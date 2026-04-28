@@ -22,15 +22,29 @@ def _color(text: str, color: str, use_color: bool = True) -> str:
     return f"{code}{text}{reset}"
 
 
+def _build_summary(result: DiffResult, use_color: bool, show_ok: bool) -> str:
+    """Build the summary line from a DiffResult."""
+    parts = []
+    if result.missing:
+        parts.append(_color(f"{len(result.missing)} missing", "red", use_color))
+    if result.extra:
+        parts.append(_color(f"{len(result.extra)} extra", "yellow", use_color))
+    if result.mismatched:
+        parts.append(_color(f"{len(result.mismatched)} mismatched", "cyan", use_color))
+    if result.ok and show_ok:
+        parts.append(_color(f"{len(result.ok)} ok", "green", use_color))
+    return "Summary: " + ", ".join(parts) if parts else "Summary: all ok"
+
+
 def format_report(result: DiffResult, use_color: bool = True, show_ok: bool = False) -> str:
     """Render a DiffResult as a human-readable string."""
     lines = []
-    header = f"Diff: {result.base_name!r} → {result.target_name!r}"
+    header = f"Diff: {result.base_name!r} \u2192 {result.target_name!r}"
     lines.append(_color(header, "bold", use_color))
     lines.append("-" * len(header))
 
     if not result.has_issues and not show_ok:
-        lines.append(_color("✔  No issues found.", "green", use_color))
+        lines.append(_color("\u2714  No issues found.", "green", use_color))
         return "\n".join(lines)
 
     for entry in result.entries:
@@ -47,16 +61,6 @@ def format_report(result: DiffResult, use_color: bool = True, show_ok: bool = Fa
             msg = f"  OK       {entry.key}"
             lines.append(_color(msg, "green", use_color))
 
-    summary_parts = []
-    if result.missing:
-        summary_parts.append(_color(f"{len(result.missing)} missing", "red", use_color))
-    if result.extra:
-        summary_parts.append(_color(f"{len(result.extra)} extra", "yellow", use_color))
-    if result.mismatched:
-        summary_parts.append(_color(f"{len(result.mismatched)} mismatched", "cyan", use_color))
-    if result.ok and show_ok:
-        summary_parts.append(_color(f"{len(result.ok)} ok", "green", use_color))
-
     lines.append("")
-    lines.append("Summary: " + ", ".join(summary_parts) if summary_parts else "Summary: all ok")
+    lines.append(_build_summary(result, use_color, show_ok))
     return "\n".join(lines)

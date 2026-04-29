@@ -1,136 +1,117 @@
-"""Command-line interface for envlens."""
+"""Entry-point for the envlens CLI."""
 from __future__ import annotations
 
+import argparse
 import sys
-from argparse import ArgumentParser, Namespace
 from pathlib import Path
+from typing import List
 
 from envlens.audit import audit_and_report, audit_many
+from envlens.cli_snapshot import add_snapshot_subparser, handle_snapshot
+from envlens.cli_template import add_template_subparser, handle_template
+from envlens.differ import diff_env_files
 from envlens.exporter import export_result
 from envlens.merger import merge_env_files
-from envlens.parser import EnvParseError
+from envlens.reporter import format_report
 
 
-def build_parser() -> ArgumentParser:
-    parser = ArgumentParser(
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
         prog="envlens",
         description="Audit and diff .env files across environments.",
     )
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command")
 
-    # ── diff ──────────────────────────────────────────────────────────────────
+    # diff
     diff_p = sub.add_parser("diff", help="Diff two .env files.")
-    diff_p.add_argument("reference", help="Reference .env file (expected keys).")
-    diff_p.add_argument("target", help="Target .env file to audit.")
-    diff_p.add_argument(
-        "--check-values",
-        action="store_true",
-        default=False,
-        help="Also flag keys whose values differ.",
-    )
-    diff_p.add_argument(
-        "--export",
-        choices=["json", "csv", "markdown"],
-        default=None,
-        help="Export diff result in the given format.",
-    )
-    diff_p.add_argument(
-        "--no-color", action="store_true", default=False, help="Disable ANSI colours."
-    )
+    diff_p.add_argument("base", help="Base .env file.")
+    diff_p.add_argument("compare", help="Comparison .env file.")
+    diff_p.add_argument("--check-values", action="store_true", default=False)
+    diff_p.add_argument("--format", choices=["text", "json", "csv", "markdown"], default="text")
+    diff_p.add_argument("--output", default=None)
 
-    # ── audit ─────────────────────────────────────────────────────────────────
-    audit_p = sub.add_parser("audit", help="Audit multiple .env files against a reference.")
-    audit_p.add_argument("reference", help="Reference .env file.")
-    audit_p.add_argument("targets", nargs="+", help="One or more target .env files.")
+    # audit
+    audit_p = sub.add_parser("audit", help="Audit one or more .env files against a base.")
+    audit_p.add_argument("base", help="Base .env file.")
+    audit_p.add_argument("targets", nargs="+", help=".env files to audit.")
     audit_p.add_argument("--check-values", action="store_true", default=False)
-    audit_p.add_argument("--no-color", action="store_true", default=False)
+    audit_p.add_argument("--format", choices=["text", "json", "csv", "markdown"], default="text")
 
-    # ── merge ─────────────────────────────────────────────────────────────────
-    merge_p = sub.add_parser(
-        "merge",
-        help="Merge .env files (last file wins) and print the result.",
-    )
-    merge_p.add_argument("files", nargs="+", help=".env files to merge in order.")
-    merge_p.add_argument(
-        "--show-overrides",
-        action="store_true",
-        default=False,
-        help="Print keys that were overridden by a later file.",
-    )
+    # merge
+    merge_p = sub.add_parser("merge", help="Merge multiple .env files.")
+    merge_p.add_argument("files", nargs="+", help=".env files to merge (later files win).")
+    merge_p.add_argument("--output", default=None, help="Write merged output to file.")
+
+    # snapshot + template
+    add_snapshot_subparser(sub)
+    add_template_subparser(sub)
 
     return parser
 
 
-def _handle_diff(args: Namespace) -> int:
-    try:
-        report = audit_and_report(
-            args.reference,
-            args.target,
-            check_values=args.check_values,
-            color=not args.no_color,
-        )
-    except EnvParseError as exc:
-        print(f"Parse error: {exc}", file=sys.stderr)
-        return 2
-
-    if args.export:
-        from envlens.audit import audit_files
-
-        result = audit_files(args.reference, args.target, check_values=args.check_values)
-        print(export_result(result, fmt=args.export))
+def _handle_diff(args: argparse.Namespace) -> int:
+    result = diff_env_files(args.base, args.compare, check_values=args.check_values)
+    fmt = args.format
+    if fmt == "text":
+        report = format_report(result, args.base, args.compare)
+        if args.output:
+            Path(args.output).write_text(report, encoding="utf-8")
+        else:
+            print(report)
     else:
-        print(report.text)
+        content = export_result(result, fmt)  # type: ignore[arg-type]
+        if args.output:
+            Path(args.output).write_text(content, encoding="utf-8")
+        else:
+            print(content)
+    return 0 if result.is_clean else 1
 
-    return 0 if report.ok else 1
 
-
-def _handle_audit(args: Namespace) -> int:
-    results = audit_many(
-        args.reference,
-        args.targets,
-        check_values=args.check_values,
-    )
+def _handle_audit(args: argparse.Namespace) -> int:
     exit_code = 0
-    for path, result in results.items():
-        header = f"=== {path} ==="
-        print(header)
-        from envlens.reporter import format_report
-
-        print(format_report(result, color=not args.no_color))
-        if not result.ok:
+    for target in args.targets:
+        result = audit_and_report(
+            args.base,
+            target,
+            check_values=args.check_values,
+            fmt=args.format,  # type: ignore[arg-type]
+        )
+        print(result)
+        if not diff_env_files(args.base, target, check_values=args.check_values).is_clean:
             exit_code = 1
     return exit_code
 
 
-def _handle_merge(args: Namespace) -> int:
-    try:
-        result = merge_env_files(*args.files)
-    except EnvParseError as exc:
-        print(f"Parse error: {exc}", file=sys.stderr)
-        return 2
-
-    for key, value in sorted(result.merged.items()):
-        print(f"{key}={value}")
-
-    if args.show_overrides and result.overridden_keys:
-        print("\n# Overridden keys:", file=sys.stderr)
-        for key in sorted(result.overridden_keys):
-            print(f"#  {key} (from {result.source_for(key)})", file=sys.stderr)
-
+def _handle_merge(args: argparse.Namespace) -> int:
+    merge_result = merge_env_files(args.files)
+    lines = [f"{k}={v}" for k, v in merge_result.merged.items()]
+    content = "\n".join(lines) + "\n"
+    if args.output:
+        Path(args.output).write_text(content, encoding="utf-8")
+        print(f"Merged {len(args.files)} files -> {args.output}")
+    else:
+        print(content)
     return 0
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: List[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    handlers = {
-        "diff": _handle_diff,
-        "audit": _handle_audit,
-        "merge": _handle_merge,
-    }
-    sys.exit(handlers[args.command](args))
+    if args.command == "diff":
+        return _handle_diff(args)
+    if args.command == "audit":
+        return _handle_audit(args)
+    if args.command == "merge":
+        return _handle_merge(args)
+    if args.command == "snapshot":
+        return handle_snapshot(args)
+    if args.command == "template":
+        return handle_template(args)
+
+    parser.print_help()
+    return 0
 
 
 if __name__ == "__main__":  # pragma: no cover
-    main()
+    sys.exit(main())

@@ -50,6 +50,9 @@ def handle_score(args: argparse.Namespace) -> int:
     except FileNotFoundError:
         print(f"[error] File not found: {path}", file=sys.stderr)
         return 2
+    except PermissionError:
+        print(f"[error] Permission denied: {path}", file=sys.stderr)
+        return 2
 
     lint_result = None if args.no_lint else lint_env(variables)
 
